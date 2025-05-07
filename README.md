@@ -1,26 +1,79 @@
 # Simulated Smart Thermostat Controller
 
-This small project simulates a single-zone smart thermostat using Python and IoT protocols. The goal is to show how software can control heating by processing sensor data and issuing commands automatically. For example, one Python script can publish simulated room-temperature readings to an MQTT broker, and another can subscribe, apply a threshold or schedule, and "turn the heater" on/off in code. MQTT is widely used for IoT messaging, making it ideal for exchanging sensor and control data in this setup. (Alternatively, you could simulate a Modbus-capable thermostat: libraries like PyModbus include a full Modbus server/simulator for testing client apps.)
+This project simulates a single-zone smart thermostat system using Python, MQTT, and a Flask-based web dashboard. It demonstrates how software can control heating by processing simulated sensor data, incorporating external weather information, and providing a user interface for monitoring and control.
 
 ## Goals
-- Automate the heating decision for a single room.
-- Demonstrate remote control logic.
+- Automate heating decisions for a single room based on simulated sensor data and a dynamic setpoint.
+- Integrate real-time external weather data to influence the heating setpoint.
+- Provide a web dashboard for live monitoring of temperature, setpoint, heating status, and outside conditions.
+- Allow users to update the weather location for the controller via the web dashboard.
+- Demonstrate a decoupled architecture using MQTT for messaging between components.
 
 ## Architecture
-- A **Sensor module** (Python) generates temperature data (e.g. random or scripted) and publishes JSON messages (e.g. `{"temp":21.5}`) to an MQTT topic.
-- A **Controller module** (Python) subscribes to that topic, logs readings to an SQL database (e.g. SQLite or PostgreSQL), and applies simple logic (if temp < setpoint, "turn on heater", else "turn off"). The controller could also use an external API (like a weather API) to adjust behavior.
+The system consists of three main Python components and an MQTT broker:
 
-## Tools/Tech
+1.  **Sensor (`sensor/sensor.py`):**
+    *   Simulates room temperature data using a random walk.
+    *   Publishes these temperature readings as JSON messages (e.g., `{"temperature": 21.5}`) to an MQTT topic (`home/1/temperature`) at regular intervals.
+    *   Uses Python's `logging` module for output.
+
+2.  **Controller (`controller/controller.py`):**
+    *   Subscribes to a command topic (`smart_thermostat/controller/command`) to receive instructions, such as updating the weather location.
+    *   Fetches real-time weather data from [WeatherAPI.com](https://www.weatherapi.com/) for a specified location.
+    *   Dynamically adjusts a global heating setpoint based on the fetched outside temperature (e.g., if outside < 5°C, setpoint decreases; if > 18°C, setpoint increases).
+    *   Periodically (e.g., every minute) re-fetches weather data, adjusts the setpoint, and publishes its comprehensive status (current location, setpoint, last outside temperature) to an MQTT topic (`smart_thermostat/controller/status_feed`).
+    *   Uses Python's `logging` module for output.
+
+3.  **Web Application & Data Hub (`app.py`):**
+    *   A Flask application that serves as the central hub for data processing, logging, and the user interface.
+    *   **MQTT Subscriber:** Subscribes to the sensor's temperature data (`home/1/temperature`) and the controller's status feed (`smart_thermostat/controller/status_feed`).
+    *   **Data Processor & Logger:**
+        *   When sensor data arrives, it determines the heating action ("HEATER ON" / "HEATER OFF") by comparing the indoor temperature against the latest setpoint received from the controller.
+        *   Logs all processed sensor events (including the determined action and relevant controller status at that time) and controller status updates to a daily SQLite database (e.g., `database/temperature_log_YYYY-MM-DD.db`).
+    *   **Web Dashboard (`templates/index.html`):**
+        *   Displays live indoor temperature, current setpoint, determined heater action, outside temperature, and current weather location.
+        *   Uses Server-Sent Events (SSE) to update dashboard values in real-time without page reloads.
+        *   Presents a Plotly chart showing historical temperature trends from the current day's database.
+        *   Includes a form to update the weather location used by the `controller.py`.
+    *   **MQTT Publisher:** Publishes commands (e.g., `UPDATE_LOCATION`) to the controller's command topic when the user updates the location via the dashboard.
+    *   Uses Python's `logging` module.
+
+4.  **MQTT Broker (e.g., Mosquitto):**
+    *   Acts as the message bus, relaying temperature data, controller status, and commands between the components.
+
+## Tools & Technologies
 - Python 3
-- Paho MQTT client library
-- An MQTT broker (e.g. Mosquitto locally)
-- A lightweight database (SQLite for logs)
-- Optionally use PyModbus to simulate a Modbus register for the heater status.
-- Git for version control and host code on GitHub with clear README.
+- Paho MQTT client library (`paho-mqtt`)
+- Flask (for the web application and SSE)
+- Plotly (for charting on the dashboard)
+- Requests (for fetching weather API data)
+- python-dotenv (for managing API keys and environment variables)
+- SQLite (for daily data logging)
+- Mosquitto (or any MQTT broker)
+- Git & GitHub
 
-## MQTT Broker Setup (Mosquitto)
+## Setup and Running the System
 
-These instructions are for macOS using Homebrew. For other operating systems, please refer to the [official Mosquitto download page](https://mosquitto.org/download/).
+### 1. Prerequisites
+- Python 3 and `pip` installed.
+- Git installed.
+
+### 2. Clone the Repository
+```bash
+git clone <repository_url>
+cd <repository_directory>
+```
+
+### 3. Set up Python Virtual Environment & Install Dependencies
+It's highly recommended to use a virtual environment:
+```bash
+python3 -m venv my_env
+source my_env/bin/activate  # On Windows: my_env\\Scripts\\activate
+pip install -r requirements.txt
+```
+
+### 4. MQTT Broker Setup (Mosquitto)
+These instructions are for macOS using Homebrew. For other operating systems, refer to the [official Mosquitto download page](https://mosquitto.org/download/).
 
 1.  **Install Mosquitto:**
     ```bash
@@ -28,70 +81,81 @@ These instructions are for macOS using Homebrew. For other operating systems, pl
     ```
 
 2.  **Run Mosquitto:**
-
     You have two main options:
-
     *   **Option A: Run as a background service (recommended for general use):**
         ```bash
         brew services start mosquitto
         ```
-        To stop the service:
-        ```bash
-        brew services stop mosquitto
-        ```
-        To restart the service:
-        ```bash
-        brew services restart mosquitto
-        ```
+        To stop: `brew services stop mosquitto`
+        To restart: `brew services restart mosquitto`
 
     *   **Option B: Run manually in the foreground (useful for development to see live logs):**
         Open a new terminal window and run:
         ```bash
         /opt/homebrew/opt/mosquitto/sbin/mosquitto -c /opt/homebrew/etc/mosquitto/mosquitto.conf
         ```
-        You should see log output in the terminal. Press `Ctrl+C` to stop it. The default MQTT port is `1883`.
+        (The path might vary based on your installation. For default Homebrew on Apple Silicon, it's often `/opt/homebrew/sbin/mosquitto`. For Intel, `/usr/local/sbin/mosquitto`.)
+        You should see log output. Press `Ctrl+C` to stop. The default MQTT port is `1883`.
 
-## Weather API Integration (Optional)
+### 5. WeatherAPI.com Configuration
+The controller fetches real-time weather data to adjust the heating setpoint.
 
-The controller can optionally fetch real-time weather data from [WeatherAPI.com](https://www.weatherapi.com/) to dynamically adjust the heating setpoint. This can help in making smarter heating decisions based on external conditions.
-
-**Setup:**
-
-1.  **Sign up for an API Key:**
-    *   Go to [WeatherAPI.com](https://www.weatherapi.com/) and register for a free API key.
+1.  **Sign up for a Free API Key:**
+    *   Go to [WeatherAPI.com](https://www.weatherapi.com/) and register.
 
 2.  **Create and Configure `.env` file:**
-    *   In the root directory of the project, create a file named `.env` (if it doesn't already exist).
-    *   Add your WeatherAPI.com API key and desired location to this file in the following format:
+    *   In the root project directory, create a file named `.env`.
+    *   Add your API key:
         ```env
         WEATHER_API_KEY="YOUR_ACTUAL_API_KEY"
-        WEATHER_API_LOCATION="YourCityNameOrPostalCode" # e.g., "London" or "90210"
         ```
-    *   Replace `YOUR_ACTUAL_API_KEY` with your key and `YourCityNameOrPostalCode` with your preferred location.
-    *   The `.env` file is included in `.gitignore` and should **not** be committed to version control.
+        Replace `YOUR_ACTUAL_API_KEY` with your key.
+    *   The initial weather location is hardcoded in `controller/controller.py` (e.g., "London") but can be changed dynamically via the web dashboard. The `.env` file is *only* for the API key.
+    *   The `.env` file is included in `.gitignore` and should **not** be committed.
 
-**How it works:**
-*   The `controller.py` script uses the `python-dotenv` library to load credentials from the `.env` file.
-*   It fetches the current outside temperature periodically (e.g., every 30 minutes).
-*   Based on the outside temperature, it applies a simple logic to adjust the base heating setpoint. For example:
-    *   If very cold outside (e.g., < 5°C), the target indoor temperature might be slightly lowered.
-    *   If mild outside (e.g., > 18°C), the target indoor temperature might be slightly raised.
-*   This adjusted setpoint is then used by the controller to decide whether to turn the heater on or off.
-*   The adjusted setpoint and the fetched outside temperature (at the time of adjustment) are logged for context, and the setpoint used for each heating decision is logged in the database.
+    If `WEATHER_API_KEY` is missing or empty, the controller will skip weather fetching and use a default setpoint.
 
-If you do not wish to use this feature, you can simply omit the `WEATHER_API_KEY` from your `.env` file, or leave it blank. The script will detect this and disable the weather-based adjustments, falling back to the `ORIGINAL_SETPOINT_TEMP`.
+### 6. Running the Application Components
+You'll need to run the three Python scripts in separate terminal windows/tabs. Ensure your virtual environment is activated in each.
 
-## Implementation Outline
-1.  **Setup MQTT**: Install/run a broker (e.g. Mosquitto).
-2.  **Simulated Sensor**: Write a Python script using `paho-mqtt` to publish a temperature (random walk or sinusoidal) every few seconds on topic like `home/1/temperature`.
-3.  **Controller Logic**: Write a Python subscriber that reads the MQTT data, writes it to the database, and checks it against a target (setpoint). If the temperature is below target, the script logs a "heater on" action; if above, "heater off". It could publish back to another topic or simply print actions.
-4.  **Optional API Integration**: Fetch real weather data via a REST API to influence the target temperature or simulate outside conditions.
-5.  **Logging & Version Control**: Store all readings/actions in SQL tables. Use Git with branches to track development and host the project on GitHub.
+1.  **Start the Sensor:**
+    ```bash
+    python sensor/sensor.py
+    ```
+    This will start publishing simulated temperature data.
+
+2.  **Start the Controller:**
+    ```bash
+    python controller/controller.py
+    ```
+    This will subscribe to commands, fetch weather, adjust setpoints, and publish its status.
+
+3.  **Start the Flask Web Application:**
+    ```bash
+    python app.py
+    ```
+    This will start the web server (usually on `http://127.0.0.1:5001`).
+
+### 7. Accessing the Dashboard
+Open your web browser and navigate to `http://127.0.0.1:5001` (or the address shown in the `app.py` console output).
+You should see:
+- Live temperature readings.
+- Current setpoint temperature (influenced by outside weather).
+- Heater action status (ON/OFF).
+- Outside temperature and weather location.
+- A form to update the weather location for the controller.
+- A chart of recent temperature history.
+
+## Development Notes
+- All components use Python's `logging` module. Check the console output of each script for detailed information and potential errors.
+- The `app.py` Flask application runs in debug mode by default, which enables the auto-reloader. MQTT client initialization has been structured to work correctly with this reloader.
+- Database files are created daily in the `database/` directory (e.g., `database/temperature_log_2025-05-07.db`).
 
 ## Potential Extensions
-- Build a simple web or mobile dashboard (e.g. Flask + JavaScript charts) to display live sensor values and heating status.
-- Add more zones or rooms by running multiple sensor threads with different MQTT topics.
-- Experiment with a PID controller or schedule for smarter control.
-- In future, the simulated MQTT setup could be replaced with real hardware (Raspberry Pi sensor) to show end-to-end readiness.
+- Add user authentication for the dashboard.
+- Implement more sophisticated heating schedules or learning algorithms in the controller.
+- Allow configuration of multiple temperature zones.
+- Persist controller settings (like location) across restarts more robustly if needed beyond in-memory.
+- Replace simulated sensor data with real hardware (e.g., Raspberry Pi with a temperature sensor).
 
 
