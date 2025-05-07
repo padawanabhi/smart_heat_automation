@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-    <meta http-equiv="refresh" content="15">
+    <!-- <meta http-equiv="refresh" content="15"> REMOVED for SSE -->
     <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
     <title>Smart Thermostat</title>
@@ -13,6 +13,8 @@
         .status-card { margin-bottom: 20px; }
         .chart-container { margin-bottom: 30px; }
         h1, h2 { margin-bottom: 20px; }
+        .value-display { font-size: 2.5rem; font-weight: bold; }
+        .lead-small {font-size: 1.25rem; font-weight: 300; }
     </style>
 </head>
 <body>
@@ -27,11 +29,9 @@
                 <div class="card status-card">
                     <div class="card-body text-center">
                         <h5 class="card-title">Indoor Temp</h5>
-                        {% if latest_reading and latest_reading.temperature is not none %}
-                            <p class="card-text display-4">{{ "%.1f"|format(latest_reading.temperature) }}°C</p>
-                        {% else %}
-                            <p class="card-text">N/A</p>
-                        {% endif %}
+                        <p id="indoorTemp" class="value-display">
+                            {{ "%.1f"|format(initial_sensor_data.temperature) if initial_sensor_data.temperature is not none else 'N/A' }}°C
+                        </p>
                     </div>
                 </div>
             </div>
@@ -39,11 +39,9 @@
                 <div class="card status-card">
                     <div class="card-body text-center">
                         <h5 class="card-title">Setpoint</h5>
-                        {% if latest_reading and latest_reading.setpoint is not none %}
-                            <p class="card-text display-4">{{ "%.1f"|format(latest_reading.setpoint) }}°C</p>
-                        {% else %}
-                            <p class="card-text">N/A</p>
-                        {% endif %}
+                        <p id="setpoint" class="value-display">
+                            {{ "%.1f"|format(initial_controller_status.current_setpoint) if initial_controller_status.current_setpoint is not none else 'N/A' }}°C
+                        </p>
                     </div>
                 </div>
             </div>
@@ -51,11 +49,7 @@
                 <div class="card status-card">
                     <div class="card-body text-center">
                         <h5 class="card-title">Heater Action</h5>
-                        {% if latest_reading and latest_reading.action %}
-                            <p class="card-text lead">{{ latest_reading.action }}</p>
-                        {% else %}
-                            <p class="card-text">N/A</p>
-                        {% endif %}
+                        <p id="heaterAction" class="lead-small">N/A</p> <!-- Updated by SSE based on temp vs setpoint -->
                     </div>
                 </div>
             </div>
@@ -63,12 +57,10 @@
                 <div class="card status-card">
                     <div class="card-body text-center">
                         <h5 class="card-title">Outside Temp</h5>
-                        {% if latest_reading and latest_reading.outside_temp is not none %}
-                             <p class="card-text display-4">{{ "%.1f"|format(latest_reading.outside_temp) }}°C</p>
-                        {% else %}
-                            <p class="card-text">N/A</p>
-                        {% endif %}
-                        <small class="text-muted">Location: {{ current_weather_location }}</small>
+                        <p id="outsideTemp" class="value-display">
+                            {{ "%.1f"|format(initial_controller_status.last_outside_temp) if initial_controller_status.last_outside_temp is not none else 'N/A' }}°C
+                        </p>
+                        <small class="text-muted">Location: <span id="locationDisplay">{{ initial_controller_status.location if initial_controller_status.location else 'Not set' }}</span></small>
                     </div>
                 </div>
             </div>
@@ -82,24 +74,94 @@
             </div>
             <button type="submit" class="btn btn-primary">Update Location</button>
         </form>
-        <p><small>Note: Controller will use new location for weather. Display updates on next data log or refresh.</small></p>
+        <p><small>Controller uses new location. Dashboard updates via live feed.</small></p>
 
 
         <h2>Temperature History</h2>
         <div class="chart-container">
             <div id="temperatureChart"></div>
         </div>
-
     </div>
 
+    <!-- Hidden elements to store initial values -->
+    <div id="initialIndoorTemp" style="display:none;">{{ initial_sensor_data.temperature if initial_sensor_data.temperature is not none else 'null_placeholder' }}</div>
+    <div id="initialSetpoint" style="display:none;">{{ initial_controller_status.current_setpoint if initial_controller_status.current_setpoint is not none else 'null_placeholder' }}</div>
+
     <script>
+        // Initial Chart (from DB on page load)
         var chart_data = {{ chart_json | safe }};
         if (Object.keys(chart_data).length > 0 && chart_data.data && chart_data.data.length > 0) {
             Plotly.newPlot('temperatureChart', chart_data.data, chart_data.layout);
         } else {
             document.getElementById('temperatureChart').innerHTML = '<p class="text-center">No chart data available or chart data is empty.</p>';
         }
+
+        // SSE for live updates
+        const indoorTempEl = document.getElementById('indoorTemp');
+        const setpointEl = document.getElementById('setpoint');
+        const heaterActionEl = document.getElementById('heaterAction');
+        const outsideTempEl = document.getElementById('outsideTemp');
+        const locationDisplayEl = document.getElementById('locationDisplay');
+
+        function parseInitialValue(valueStr) {
+            if (valueStr === 'null_placeholder' || valueStr === null || valueStr === undefined) {
+                return null;
+            }
+            const num = parseFloat(valueStr);
+            return isNaN(num) ? null : num;
+        }
+
+        const initialIndoorTempStr = document.getElementById('initialIndoorTemp').textContent;
+        const initialSetpointStr = document.getElementById('initialSetpoint').textContent;
+
+        let currentIndoorTemp = parseInitialValue(initialIndoorTempStr);
+        let currentSetpoint = parseInitialValue(initialSetpointStr);
+
+        const source = new EventSource("{{ url_for('dashboard_feed') }}");
+        source.onmessage = function(event) {
+            const eventData = JSON.parse(event.data);
+            console.log("SSE received:", eventData);
+
+            if (eventData.type === "sensor_update" && eventData.data) {
+                const newTemp = eventData.data.temperature;
+                if (newTemp !== null && newTemp !== undefined) {
+                    indoorTempEl.textContent = parseFloat(newTemp).toFixed(1) + '°C';
+                    currentIndoorTemp = parseFloat(newTemp);
+                } else {
+                    indoorTempEl.textContent = 'N/A';
+                    currentIndoorTemp = null;
+                }
+            } else if (eventData.type === "controller_status" && eventData.data) {
+                const controllerData = eventData.data;
+                if (controllerData.current_setpoint !== null && controllerData.current_setpoint !== undefined) {
+                    setpointEl.textContent = parseFloat(controllerData.current_setpoint).toFixed(1) + '°C';
+                    currentSetpoint = parseFloat(controllerData.current_setpoint);
+                } else {
+                    setpointEl.textContent = 'N/A';
+                    currentSetpoint = null;
+                }
+                if (controllerData.last_outside_temp !== null && controllerData.last_outside_temp !== undefined) {
+                    outsideTempEl.textContent = parseFloat(controllerData.last_outside_temp).toFixed(1) + '°C';
+                } else {
+                    outsideTempEl.textContent = 'N/A';
+                }
+                locationDisplayEl.textContent = controllerData.location || 'Not set';
+            }
+
+            // Update heater action based on current values
+            if (currentIndoorTemp !== null && currentSetpoint !== null) {
+                heaterActionEl.textContent = currentIndoorTemp < currentSetpoint ? "HEATER ON" : "HEATER OFF";
+            } else {
+                heaterActionEl.textContent = "N/A";
+            }
+        };
+        source.onerror = function(err) {
+            console.error("SSE Error:", err);
+            // Optionally, display an error to the user or attempt to reconnect
+        };
+
     </script>
+    <!-- Bootstrap JS and dependencies -->
     <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.5.3/dist/umd/popper.min.js"></script>
     <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
