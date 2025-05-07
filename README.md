@@ -1,6 +1,6 @@
 # Simulated Smart Thermostat Controller
 
-![Dashboard Demo](assets/dashboard.gif)
+![Dashboard Demo](assets/smarthomeautomation.gif)
 
 This project simulates a single-zone smart thermostat system using Python, MQTT, and a Flask-based web dashboard. It demonstrates how software can control heating by processing simulated sensor data, incorporating external weather information, and providing a user interface for monitoring and control.
 
