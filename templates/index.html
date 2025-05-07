@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <meta http-equiv="refresh" content="15">
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <title>Smart Thermostat</title>
+    <style>
+        body { padding-top: 20px; }
+        .container { max-width: 960px; }
+        .status-card { margin-bottom: 20px; }
+        .chart-container { margin-bottom: 30px; }
+        h1, h2 { margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="text-center">
+            <h1>Smart Thermostat Dashboard</h1>
+        </div>
+
+        <h2>Current Status</h2>
+        <div class="row">
+            <div class="col-md-3">
+                <div class="card status-card">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">Indoor Temp</h5>
+                        {% if latest_reading and latest_reading.temperature is not none %}
+                            <p class="card-text display-4">{{ "%.1f"|format(latest_reading.temperature) }}°C</p>
+                        {% else %}
+                            <p class="card-text">N/A</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card status-card">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">Setpoint</h5>
+                        {% if latest_reading and latest_reading.setpoint is not none %}
+                            <p class="card-text display-4">{{ "%.1f"|format(latest_reading.setpoint) }}°C</p>
+                        {% else %}
+                            <p class="card-text">N/A</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card status-card">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">Heater Action</h5>
+                        {% if latest_reading and latest_reading.action %}
+                            <p class="card-text lead">{{ latest_reading.action }}</p>
+                        {% else %}
+                            <p class="card-text">N/A</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card status-card">
+                    <div class="card-body text-center">
+                        <h5 class="card-title">Outside Temp</h5>
+                        {% if latest_reading and latest_reading.outside_temp is not none %}
+                             <p class="card-text display-4">{{ "%.1f"|format(latest_reading.outside_temp) }}°C</p>
+                        {% else %}
+                            <p class="card-text">N/A</p>
+                        {% endif %}
+                        <small class="text-muted">Location: {{ current_weather_location }}</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <h2>Update Controller Weather Location</h2>
+        <form method="POST" action="{{ url_for('update_location') }}" class="form-inline mb-4">
+            <div class="form-group mr-2">
+                <label for="location" class="sr-only">Location (City/Zip)</label>
+                <input type="text" class="form-control" id="location" name="location" placeholder="Enter City or Zip Code" required>
+            </div>
+            <button type="submit" class="btn btn-primary">Update Location</button>
+        </form>
+        <p><small>Note: Controller will use new location for weather. Display updates on next data log or refresh.</small></p>
+
+
+        <h2>Temperature History</h2>
+        <div class="chart-container">
+            <div id="temperatureChart"></div>
+        </div>
+
+    </div>
+
+    <script>
+        var chart_data = {{ chart_json | safe }};
+        if (Object.keys(chart_data).length > 0 && chart_data.data && chart_data.data.length > 0) {
+            Plotly.newPlot('temperatureChart', chart_data.data, chart_data.layout);
+        } else {
+            document.getElementById('temperatureChart').innerHTML = '<p class="text-center">No chart data available or chart data is empty.</p>';
+        }
+    </script>
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.5.3/dist/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+</body>
+</html> 

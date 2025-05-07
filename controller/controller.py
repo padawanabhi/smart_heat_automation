@@ -25,20 +25,23 @@ BROKER_ADDRESS = "localhost"
 BROKER_PORT = 1883
 MQTT_TOPIC_TEMPERATURE = "home/1/temperature"
 MQTT_TOPIC_HEATER_STATUS = "home/1/heater_status" # Optional: for publishing heater status
+CONTROLLER_COMMAND_TOPIC = "smart_thermostat/controller/command" # New topic for commands
 
 # Controller Logic Parameters
 ORIGINAL_SETPOINT_TEMP = 20.0  # Base desired temperature
-current_setpoint_temp = ORIGINAL_SETPOINT_TEMP # Can be dynamically adjusted
+global_current_setpoint_temp = ORIGINAL_SETPOINT_TEMP # Dynamically adjusted
 
 # Database Parameters
 DB_NAME = "database/temperature_log.db"
 
 # Weather API Parameters (WeatherAPI.com)
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY") # Load from .env
-WEATHER_API_LOCATION = os.getenv("WEATHER_API_LOCATION", "London")  # Load from .env or default
+global_weather_api_location = "London" # Default location, managed in script memory
+global_last_fetched_outside_temp = None # Store the last successfully fetched outside temperature
 WEATHER_API_BASE_URL = "http://api.weatherapi.com/v1/current.json"
-WEATHER_FETCH_INTERVAL = 1800  # Seconds (30 minutes)
+WEATHER_FETCH_INTERVAL = 60  # Seconds (1 minute)
 weather_thread_stop_event = threading.Event()
+weather_fetch_trigger_event = threading.Event() # For immediate fetch requests
 
 def fetch_weather_data(api_key, location):
     """Fetches current weather data from WeatherAPI.com."""
@@ -53,6 +56,7 @@ def fetch_weather_data(api_key, location):
         "key": api_key,
         "q": location
     }
+    logger.info(f"Fetching weather for location: {location}")
     try:
         response = requests.get(WEATHER_API_BASE_URL, params=params, timeout=10)
         response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
@@ -78,13 +82,13 @@ def fetch_weather_data(api_key, location):
 
 def adjust_setpoint(outside_temp_c, original_setpoint):
     """Adjusts the heating setpoint based on outside temperature."""
-    global current_setpoint_temp
+    global global_current_setpoint_temp, global_last_fetched_outside_temp
     if outside_temp_c is None:
         logger.warning("Cannot adjust setpoint, outside temperature not available.")
-        # Optionally revert to original setpoint or keep last known good adjusted setpoint
-        # current_setpoint_temp = original_setpoint # Revert to original if weather fails
+        # Do not clear global_last_fetched_outside_temp here, keep the last known good one
         return
 
+    global_last_fetched_outside_temp = outside_temp_c # Store successfully fetched temp
     adjusted_setpoint = original_setpoint
     if outside_temp_c < 5.0:
         adjusted_setpoint = original_setpoint - 1.0
@@ -94,38 +98,49 @@ def adjust_setpoint(outside_temp_c, original_setpoint):
         logger.info(f"Outside temp ({outside_temp_c}°C) is > 18°C. Adjusting setpoint to {adjusted_setpoint}°C.")
     else:
         # Keep original setpoint if within moderate range or if it's already the adjusted one
-        if current_setpoint_temp != original_setpoint: # Only log if it's changing back
+        if global_current_setpoint_temp != original_setpoint: # Only log if it's changing back
              logger.info(f"Outside temp ({outside_temp_c}°C) is moderate. Reverting/keeping setpoint at {original_setpoint}°C.")
         adjusted_setpoint = original_setpoint
 
 
-    if current_setpoint_temp != adjusted_setpoint:
-        current_setpoint_temp = round(adjusted_setpoint, 1)
-        logger.info(f"Global setpoint updated to: {current_setpoint_temp}°C")
+    new_setpoint = round(adjusted_setpoint, 1)
+    if global_current_setpoint_temp != new_setpoint:
+        global_current_setpoint_temp = new_setpoint
+        logger.info(f"Global setpoint updated to: {global_current_setpoint_temp}°C based on outside temp {outside_temp_c}°C")
     else:
-        logger.info(f"Setpoint remains: {current_setpoint_temp}°C based on outside temp {outside_temp_c}°C.")
+        logger.info(f"Setpoint remains: {global_current_setpoint_temp}°C based on outside temp {outside_temp_c}°C")
 
+
+def do_weather_update_and_setpoint_adjustment():
+    """Performs a single weather update and setpoint adjustment."""
+    global global_weather_api_location # Use the global, potentially updated location
+    current_location_to_fetch = global_weather_api_location
+    if not WEATHER_API_KEY or not current_location_to_fetch:
+        logger.warning("Weather API Key or Location not set. Dynamic setpoint adjustment disabled for this cycle.")
+        return
+
+    outside_temp = fetch_weather_data(WEATHER_API_KEY, current_location_to_fetch)
+    if outside_temp is not None:
+        adjust_setpoint(outside_temp, ORIGINAL_SETPOINT_TEMP)
 
 def periodically_fetch_weather_and_adjust_setpoint():
-    """Periodically fetches weather and adjusts the setpoint."""
-    global current_setpoint_temp
+    """Periodically fetches weather and adjusts the setpoint, or on demand."""
     logger.info("Weather update thread started.")
-    # Initial fetch and adjustment on startup if key and location are available
-    if WEATHER_API_KEY and WEATHER_API_LOCATION:
-        initial_outside_temp = fetch_weather_data(WEATHER_API_KEY, WEATHER_API_LOCATION)
-        if initial_outside_temp is not None:
-            adjust_setpoint(initial_outside_temp, ORIGINAL_SETPOINT_TEMP)
-    else:
-        logger.warning("Weather API Key or Location not set in .env file. Dynamic setpoint adjustment will be disabled.")
+    
+    # Initial fetch on startup
+    do_weather_update_and_setpoint_adjustment()
 
     while not weather_thread_stop_event.is_set():
-        if WEATHER_API_KEY and WEATHER_API_LOCATION:
-            outside_temp = fetch_weather_data(WEATHER_API_KEY, WEATHER_API_LOCATION)
-            if outside_temp is not None:
-                adjust_setpoint(outside_temp, ORIGINAL_SETPOINT_TEMP)
+        # Wait for the trigger event or timeout for the regular interval
+        run_now = weather_fetch_trigger_event.wait(WEATHER_FETCH_INTERVAL)
+        if weather_thread_stop_event.is_set(): # Check if stop was requested during wait
+            break
+        if run_now:
+            logger.info("Immediate weather fetch triggered.")
+            weather_fetch_trigger_event.clear() # Reset the trigger
         
-        # Wait for the next fetch interval or until stop event is set
-        weather_thread_stop_event.wait(WEATHER_FETCH_INTERVAL)
+        do_weather_update_and_setpoint_adjustment()
+        
     logger.info("Weather update thread stopped.")
 
 def setup_database():
@@ -139,24 +154,23 @@ def setup_database():
             temperature REAL,
             action TEXT,
             setpoint REAL,
-            outside_temp REAL NULLABLE 
+            outside_temp REAL NULLABLE,
+            location TEXT NULLABLE 
         )
-    ''') # Added setpoint and outside_temp to DB
+    ''') # Added location to DB
     conn.commit()
     conn.close()
-    logger.info(f"Database {DB_NAME} setup complete with new columns.")
+    logger.info(f"Database {DB_NAME} setup complete with location column.")
 
-def log_to_database(temperature, action, current_setpoint, outside_temperature=None):
+def log_to_database(temperature, action, current_setpoint, outside_temperature, current_location):
     """Logs the temperature reading, action, setpoint, and outside temp to the SQLite database."""
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        # For simplicity, store last known outside_temp if available
-        # More robust would be to fetch it or pass it if directly relevant to this log event
-        cursor.execute("INSERT INTO readings (temperature, action, setpoint, outside_temp) VALUES (?, ?, ?, ?)",
-                       (temperature, action, current_setpoint, outside_temperature))
+        cursor.execute("INSERT INTO readings (temperature, action, setpoint, outside_temp, location) VALUES (?, ?, ?, ?, ?)",
+                       (temperature, action, current_setpoint, outside_temperature, current_location))
         conn.commit()
-        logger.debug(f"Logged to DB: temp={temperature}, action='{action}', setpoint={current_setpoint}, outside_temp={outside_temperature}")
+        logger.debug(f"Logged to DB: temp={temperature}, action='{action}', setpoint={current_setpoint}, outside_temp={outside_temperature}, loc={current_location}")
     except sqlite3.Error as e:
         logger.error(f"Database error: {e}")
     finally:
@@ -168,43 +182,67 @@ def on_connect(client, userdata, flags, rc, properties=None):
         logger.info(f"Controller connected to MQTT Broker at {BROKER_ADDRESS}:{BROKER_PORT}")
         client.subscribe(MQTT_TOPIC_TEMPERATURE)
         logger.info(f"Subscribed to topic: {MQTT_TOPIC_TEMPERATURE}")
+        client.subscribe(CONTROLLER_COMMAND_TOPIC) # Subscribe to command topic
+        logger.info(f"Subscribed to command topic: {CONTROLLER_COMMAND_TOPIC}")
     else:
         logger.error(f"Controller failed to connect, return code {rc}")
 
 def on_message(client, userdata, msg):
     """Callback function to handle incoming messages."""
-    global current_setpoint_temp # Use the potentially adjusted setpoint
-    try:
-        logger.debug(f"Received message on {msg.topic}: {msg.payload.decode()}")
-        data = json.loads(msg.payload.decode())
-        
-        if "temperature" in data:
-            current_indoor_temp = data["temperature"]
-            logger.info(f"Current indoor temperature: {current_indoor_temp}°C (Setpoint: {current_setpoint_temp}°C)")
-            
-            action = ""
-            if current_indoor_temp < current_setpoint_temp:
-                action = "HEATER ON"
-                logger.info(f"Indoor temp {current_indoor_temp}°C is BELOW setpoint {current_setpoint_temp}°C. Action: {action}")
+    global global_current_setpoint_temp, global_weather_api_location, global_last_fetched_outside_temp
+    
+    if msg.topic == CONTROLLER_COMMAND_TOPIC:
+        try:
+            payload = json.loads(msg.payload.decode())
+            logger.info(f"Received command on {msg.topic}: {payload}")
+            command = payload.get("command")
+            if command == "UPDATE_LOCATION":
+                new_location = payload.get("location")
+                if new_location:
+                    if global_weather_api_location != new_location:
+                        logger.info(f"Command received to update weather location from '{global_weather_api_location}' to: '{new_location}'")
+                        global_weather_api_location = new_location
+                        do_weather_update_and_setpoint_adjustment()
+                        logger.info(f"Logging location update event to database for new location: {new_location}")
+                        log_to_database(temperature=None, 
+                                        action="LOCATION_UPDATE", 
+                                        current_setpoint=global_current_setpoint_temp, 
+                                        outside_temperature=global_last_fetched_outside_temp,
+                                        current_location=global_weather_api_location) # Log new location
+                    else:
+                        logger.info(f"Location already set to '{new_location}'. No update needed or re-triggering fetch.")
+                else:
+                    logger.warning("UPDATE_LOCATION command received without location data.")
             else:
-                action = "HEATER OFF"
-                logger.info(f"Indoor temp {current_indoor_temp}°C is AT/ABOVE setpoint {current_setpoint_temp}°C. Action: {action}")
-            
-            # For now, log_to_database won't have live outside_temp unless we restructure
-            # We can fetch it again here, or rely on the periodic update for the setpoint context
-            log_to_database(current_indoor_temp, action, current_setpoint_temp) 
-            
-            # Optional: Publish heater status back to another topic
-            # client.publish(MQTT_TOPIC_HEATER_STATUS, json.dumps({"status": action, "setpoint": current_setpoint_temp}))
-            # logger.info(f"Published to {MQTT_TOPIC_HEATER_STATUS}: {json.dumps({'status': action, 'setpoint': current_setpoint_temp})}")
+                logger.warning(f"Unknown command received: {command}")
+        except json.JSONDecodeError:
+            logger.error(f"Error decoding JSON command: {msg.payload.decode()}")
+        except Exception as e:
+            logger.error(f"Error processing command: {e}", exc_info=True)
+        return # Command processed, no further action for this message type
 
-        else:
-            logger.warning("Received message does not contain 'temperature' key.")
+    # Existing temperature message handling
+    if msg.topic == MQTT_TOPIC_TEMPERATURE:
+        try:
+            logger.debug(f"Received message on {msg.topic}: {msg.payload.decode()}")
+            data = json.loads(msg.payload.decode())
             
-    except json.JSONDecodeError:
-        logger.error(f"Error decoding JSON: {msg.payload.decode()}")
-    except Exception as e:
-        logger.error(f"Error in on_message: {e}", exc_info=True)
+            if "temperature" in data:
+                current_indoor_temp = data["temperature"]
+                logger.info(f"Indoor: {current_indoor_temp}°C, Setpoint: {global_current_setpoint_temp}°C, Location: {global_weather_api_location}, Last Outside: {global_last_fetched_outside_temp}°C")
+                
+                action = "HEATER OFF"
+                if current_indoor_temp < global_current_setpoint_temp:
+                    action = "HEATER ON"
+                
+                logger.info(f"Action: {action}")
+                log_to_database(current_indoor_temp, action, global_current_setpoint_temp, global_last_fetched_outside_temp, global_weather_api_location)
+            else:
+                logger.warning("Temperature message lacks 'temperature' key.")
+        except json.JSONDecodeError:
+            logger.error(f"Error decoding JSON temperature: {msg.payload.decode()}")
+        except Exception as e:
+            logger.error(f"Error in on_message (temperature): {e}", exc_info=True)
 
 # --- Main script execution ---
 setup_database()
@@ -245,6 +283,7 @@ except Exception as e:
 finally:
     logger.info("Stopping weather update thread...")
     weather_thread_stop_event.set()
+    weather_fetch_trigger_event.set() # Wake up thread so it can check stop_event
     if weather_thread.is_alive():
         weather_thread.join(timeout=5) # Wait for thread to finish
         if weather_thread.is_alive(): # If it's still alive after timeout
